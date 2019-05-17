@@ -8,7 +8,7 @@ from .vae import Encoder, Decoder, LadderEncoder, LadderDecoder, ConvPreEncoder,
 
 
 class Classifier(nn.Module):
-    def __init__(self, dims, activation_fn=nn.ReLU, batch_norm=False):
+    def __init__(self, dims, activation_fn=nn.ReLU, batch_norm=True):
         """
         Single hidden layer classifier
         with softmax output.
@@ -69,7 +69,7 @@ class Classifier(nn.Module):
 class DeepGenerativeModel(VariationalAutoencoder):
     def __init__(
         self, dims, output_activation=nn.Sigmoid,
-        activation_fn=nn.ReLU, batch_norm=False):
+        activation_fn=nn.ReLU, batch_norm=True):
 
         """
         M2 code replication from the paper
@@ -196,7 +196,7 @@ class StackedDeepGenerativeModel():
         return logits
 
 class AuxiliaryDeepGenerativeModel(DeepGenerativeModel):
-    def __init__(self, dims, conv=False, batch_norm=False):
+    def __init__(self, dims, conv=False, batch_norm=True):
         """
         Auxiliary Deep Generative Models [Maaløe 2016]
         code replication. The ADGM introduces an additional
@@ -217,6 +217,7 @@ class AuxiliaryDeepGenerativeModel(DeepGenerativeModel):
             self.post_decoder = ConvPostDecoder()
 
         self.aux_encoder = Encoder([x_dim, h_dim, a_dim], batch_norm=batch_norm)
+        self.aux_decoder = Encoder([[x_dim, y_dim, z_dim], list(reversed(h_dim)), a_dim], batch_norm=batch_norm)
 
         self.classifier = Classifier([[x_dim, a_dim], h_dim, y_dim], batch_norm=batch_norm)
 

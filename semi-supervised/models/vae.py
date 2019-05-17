@@ -30,7 +30,7 @@ class Perceptron(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, dims, sample_layer=GaussianSample, activation_fn=nn.ReLU, batch_norm=False):
+    def __init__(self, dims, sample_layer=GaussianSample, activation_fn=nn.ReLU, batch_norm=True):
         """
         Inference network
 
@@ -89,7 +89,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, dims, output_activation=F.sigmoid, activation_fn=nn.ReLU, batch_norm=False):
+    def __init__(self, dims, output_activation=F.sigmoid, activation_fn=nn.ReLU, batch_norm=True):
         """
         Generative network
 
