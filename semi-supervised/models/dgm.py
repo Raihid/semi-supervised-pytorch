@@ -4,28 +4,73 @@ import torch.nn.functional as F
 from torch.nn import init
 
 from .vae import VariationalAutoencoder
-from .vae import Encoder, Decoder, LadderEncoder, LadderDecoder
+from .vae import Encoder, Decoder, LadderEncoder, LadderDecoder, ConvPreEncoder, ConvPostDecoder
 
 
 class Classifier(nn.Module):
-    def __init__(self, dims):
+    def __init__(self, dims, activation_fn=nn.ReLU, batch_norm=False):
         """
         Single hidden layer classifier
         with softmax output.
         """
         super(Classifier, self).__init__()
         [x_dim, h_dim, y_dim] = dims
-        self.dense = nn.Linear(x_dim, h_dim)
-        self.logits = nn.Linear(h_dim, y_dim)
 
-    def forward(self, x):
-        x = F.relu(self.dense(x))
+        print(x_dim)
+        if isinstance(x_dim, list):
+            self.first_dense = nn.ModuleList(
+                [nn.Linear(in_dim, h_dim[0]) for in_dim in x_dim])
+        else:
+            self.first_dense = nn.ModuleList([nn.Linear(x_dim, h_dim[0])])
+
+        # Combine all inputs in the first layer by summation
+        # e.g. z = w_1 * x + w_2 * a
+        linear_layers = []
+        for idx in range(0, len(h_dim) - 1):
+            if batch_norm:
+                linear_layers += [
+                    activation_fn(),
+                    nn.BatchNorm1d(h_dim[idx]),
+                    nn.Linear(h_dim[idx], h_dim[idx+1])
+                ]
+            else:
+                linear_layers += [
+                    activation_fn(),
+                    nn.Linear(h_dim[idx], h_dim[idx+1])
+                ]
+
+        # linear_layers += [activation_layer(), nn.BatchNorm1d(h_dim[-1])]
+        linear_layers += [activation_fn()]
+        if batch_norm:
+            linear_layers += [nn.BatchNorm1d(h_dim[-1])]
+        
+
+        print("Linear layers in classifier", linear_layers)
+        self.hidden = nn.ModuleList(linear_layers)
+        self.logits = nn.Linear(h_dim[-1], y_dim)
+
+    def forward(self, input_):
+        if not isinstance(input_, list):
+            input_ = [input_]
+
+        # Combine inputs
+        multi_x = []
+        for x, dense in zip(input_, self.first_dense):
+            multi_x += [dense(x)]
+        x = sum(multi_x)
+        
+        # Forward
+        for layer in self.hidden:
+            x = layer(x)
         x = F.softmax(self.logits(x), dim=-1)
         return x
 
 
 class DeepGenerativeModel(VariationalAutoencoder):
-    def __init__(self, dims):
+    def __init__(
+        self, dims, output_activation=nn.Sigmoid,
+        activation_fn=nn.ReLU, batch_norm=False):
+
         """
         M2 code replication from the paper
         'Semi-Supervised Learning with Deep Generative Models'
@@ -41,9 +86,23 @@ class DeepGenerativeModel(VariationalAutoencoder):
         [x_dim, self.y_dim, z_dim, h_dim] = dims
         super(DeepGenerativeModel, self).__init__([x_dim, z_dim, h_dim])
 
-        self.encoder = Encoder([x_dim + self.y_dim, h_dim, z_dim])
-        self.decoder = Decoder([z_dim + self.y_dim, list(reversed(h_dim)), x_dim])
-        self.classifier = Classifier([x_dim, h_dim[0], self.y_dim])
+        self.encoder = Encoder(
+            [[x_dim, self.y_dim], h_dim, z_dim],
+            activation_fn=activation_fn,
+            batch_norm=batch_norm
+        )
+        self.decoder = Decoder(
+            [[z_dim, self.y_dim], list(reversed(h_dim)), x_dim],
+            activation_fn=activation_fn, 
+            output_activation=output_activation,
+            batch_norm=batch_norm
+        )
+        self.classifier = Classifier(
+            [x_dim, h_dim, self.y_dim],
+            activation_fn=activation_fn,
+            batch_norm=batch_norm
+        )
+
 
         for m in self.modules():
             if isinstance(m, nn.Linear):
@@ -53,12 +112,13 @@ class DeepGenerativeModel(VariationalAutoencoder):
 
     def forward(self, x, y):
         # Add label and data and generate latent variable
-        z, z_mu, z_log_var = self.encoder(torch.cat([x, y], dim=1))
+        z, z_mu, z_log_var = self.encoder([x, y])
 
+        # E_q(z|x, y) [ p(z) - q(z|x,y) ]
         self.kl_divergence = self._kld(z, (z_mu, z_log_var))
 
         # Reconstruct data point from latent data and label
-        x_mu = self.decoder(torch.cat([z, y], dim=1))
+        x_mu = self.decoder([z, y])
 
         return x_mu
 
@@ -74,12 +134,12 @@ class DeepGenerativeModel(VariationalAutoencoder):
         :return: x
         """
         y = y.float()
-        x = self.decoder(torch.cat([z, y], dim=1))
+        x = self.decoder([z, y])
         return x
 
 
-class StackedDeepGenerativeModel(DeepGenerativeModel):
-    def __init__(self, dims, features):
+class StackedDeepGenerativeModel():
+    def __init__(self, dims, features, activation_fn=nn.ReLU):
         """
         M1+M2 model as described in [Kingma 2014].
 
@@ -89,11 +149,16 @@ class StackedDeepGenerativeModel(DeepGenerativeModel):
             trained on the same dataset.
         """
         [x_dim, y_dim, z_dim, h_dim] = dims
-        super(StackedDeepGenerativeModel, self).__init__([features.z_dim, y_dim, z_dim, h_dim])
+
+        self.dgm = DeepGenerativeModel(
+            [features.z_dim, y_dim, z_dim, h_dim],
+            activation_fn=activation_fn,
+            output_activation=None
+        )
 
         # Be sure to reconstruct with the same dimensions
-        in_features = self.decoder.reconstruction.in_features
-        self.decoder.reconstruction = nn.Linear(in_features, x_dim)
+        # in_features = self.decoder.reconstruction.in_features
+        # self.decoder.reconstruction = nn.Linear(in_features, x_dim)
 
         # Make vae feature model untrainable by freezing parameters
         self.features = features
@@ -102,20 +167,36 @@ class StackedDeepGenerativeModel(DeepGenerativeModel):
         for param in self.features.parameters():
             param.requires_grad = False
 
+    def encode(self, x, y=None):
+        _, x, _ = self.features.encode(x)
+        if y is None:
+            logits = self.dgm.classifier(x)
+            y = (logits == logits.max(1)[0].reshape(-1, 1)).float()
+
+        z, z_mu, z_log_var = self.dgm.encoder([x, y])
+        return z, z_mu, z_log_var
+
+
     def forward(self, x, y):
         # Sample a new latent x from the M1 model
-        x_sample, _, _ = self.features.encoder(x)
-
+        x_sample, _, _ = self.features.encode(x)
         # Use the sample as new input to M2
-        return super(StackedDeepGenerativeModel, self).forward(x_sample, y)
+        x = self.dgm.forward(x_sample, y)
+        return self.features.decoder(x)
+
+    def sample(self, z, y):
+        y = y.float()
+        x = self.dgm.sample(z, y)
+        x = self.features.sample(x)
+        return x
 
     def classify(self, x):
-        _, x, _ = self.features.encoder(x)
-        logits = self.classifier(x)
+        x, _, _ = self.features.encode(x)
+        logits = self.dgm.classifier(x)
         return logits
 
 class AuxiliaryDeepGenerativeModel(DeepGenerativeModel):
-    def __init__(self, dims):
+    def __init__(self, dims, conv=False, batch_norm=False):
         """
         Auxiliary Deep Generative Models [Maaløe 2016]
         code replication. The ADGM introduces an additional
@@ -124,23 +205,46 @@ class AuxiliaryDeepGenerativeModel(DeepGenerativeModel):
 
         :param dims: dimensions of x, y, z, a and hidden layers.
         """
+
         [x_dim, y_dim, z_dim, a_dim, h_dim] = dims
+        if conv:
+            x_dim = 64 * 4 * 4
         super(AuxiliaryDeepGenerativeModel, self).__init__([x_dim, y_dim, z_dim, h_dim])
+        self.conv = conv
 
-        self.aux_encoder = Encoder([x_dim, h_dim, a_dim])
-        self.aux_decoder = Encoder([x_dim + z_dim + y_dim, list(reversed(h_dim)), a_dim])
+        if conv:
+            self.pre_encoder = ConvPreEncoder()
+            self.post_decoder = ConvPostDecoder()
 
-        self.classifier = Classifier([x_dim + a_dim, h_dim[0], y_dim])
+        self.aux_encoder = Encoder([x_dim, h_dim, a_dim], batch_norm=batch_norm)
 
-        self.encoder = Encoder([a_dim + y_dim + x_dim, h_dim, z_dim])
-        self.decoder = Decoder([y_dim + z_dim, list(reversed(h_dim)), x_dim])
+        self.classifier = Classifier([[x_dim, a_dim], h_dim, y_dim], batch_norm=batch_norm)
+
+        self.encoder = Encoder([[x_dim, y_dim,  a_dim], h_dim, z_dim], batch_norm=batch_norm)
+        self.decoder = Decoder([[z_dim, y_dim], list(reversed(h_dim)), x_dim], batch_norm=batch_norm)
+
+    def encode(self, x, y=None):
+        if self.conv:
+            x = self.pre_encoder(x)
+
+        a, a_mu, a_log_var = self.aux_encoder(x)
+
+        if y is None:
+            logits = self.classifier([x, a])
+            y = (logits == logits.max(1)[0].reshape(-1, 1)).float()
+
+        z, z_mu, z_log_var = self.encoder([x, y, a])
+        return z, z_mu, z_log_var
+
 
     def classify(self, x):
+        if self.conv:
+            x = self.pre_encoder(x)
         # Auxiliary inference q(a|x)
         a, a_mu, a_log_var = self.aux_encoder(x)
 
         # Classification q(y|a,x)
-        logits = self.classifier(torch.cat([x, a], dim=1))
+        logits = self.classifier([x, a])
         return logits
 
     def forward(self, x, y):
@@ -150,22 +254,49 @@ class AuxiliaryDeepGenerativeModel(DeepGenerativeModel):
         :param y: labels
         :return: reconstruction
         """
+        if self.conv:
+            x = self.pre_encoder(x)
+
+        # print(self.conv, x.shape)
         # Auxiliary inference q(a|x)
+
         q_a, q_a_mu, q_a_log_var = self.aux_encoder(x)
 
         # Latent inference q(z|a,y,x)
-        z, z_mu, z_log_var = self.encoder(torch.cat([x, y, q_a], dim=1))
+        z, z_mu, z_log_var = self.encoder([x, y, q_a])
 
         # Generative p(x|z,y)
-        x_mu = self.decoder(torch.cat([z, y], dim=1))
+        x_mu = self.decoder([z, y])
+        if self.conv:
+            x_mu = self.post_decoder(x_mu)
 
-        # Generative p(a|z,y,x)
-        p_a, p_a_mu, p_a_log_var = self.aux_decoder(torch.cat([x, y, z], dim=1))
+        # No need to generate p(a|z,y,x)
 
-        a_kl = self._kld(q_a, (q_a_mu, q_a_log_var), (p_a_mu, p_a_log_var))
+        # KL done in the same way as in
+        # http://github.com/ml-lab/auxiliary-deep-generative-models 
+
+        # E_q(a,z|x, y) [ p(a) - q(a|x) ]
+        a_kl = self._kld(q_a, (q_a_mu, q_a_log_var))
+
+        # E_q(a,z|x, y) [ p(z) - q(z|x,y) ]
         z_kl = self._kld(z, (z_mu, z_log_var))
 
         self.kl_divergence = a_kl + z_kl
+
+        return x_mu
+
+    def sample(self, z, y):
+        """
+        Forward through the model
+        :param x: features
+        :param y: labels
+        :return: reconstruction
+        """
+
+        # Generative p(x|z,y)
+        x_mu = self.decoder([z, y])
+        if self.conv:
+            x_mu = self.post_decoder(x_mu)
 
         return x_mu
 

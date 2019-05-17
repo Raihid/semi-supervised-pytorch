@@ -3,6 +3,7 @@ from itertools import repeat
 import torch
 from torch import nn
 import torch.nn.functional as F
+import numpy as np
 
 from utils import log_sum_exp, enumerate_discrete
 from .distributions import log_standard_categorical
@@ -22,7 +23,9 @@ class ImportanceWeightedSampler(object):
         self.iw = iw
 
     def resample(self, x):
-        return x.repeat(self.mc * self.iw, 1)
+        repeat_shape = np.ones_like(x.shape)
+        repeat_shape[0] = self.mc * self.iw
+        return x.repeat(*repeat_shape)
 
     def __call__(self, elbo):
         elbo = elbo.view(self.mc, self.iw, -1)
@@ -79,7 +82,11 @@ class SVI(nn.Module):
         # Enumerate choices of label
         if not is_labelled:
             ys = enumerate_discrete(xs, self.model.y_dim)
-            xs = xs.repeat(self.model.y_dim, 1)
+            repeat_shape = np.ones_like(xs.shape)
+            repeat_shape[0] = self.model.y_dim
+
+            xs = xs.repeat(*repeat_shape)
+
 
         # Increase sampling dimension
         xs = self.sampler.resample(xs)
@@ -97,12 +104,14 @@ class SVI(nn.Module):
         elbo = likelihood + prior - next(self.beta) * self.model.kl_divergence
         L = self.sampler(elbo)
 
+
         if is_labelled:
             return torch.mean(L)
 
         logits = self.model.classify(x)
 
         L = L.view_as(logits.t()).t()
+
 
         # Calculate entropy H(q(y|x)) and sum over all labels
         H = -torch.sum(torch.mul(logits, torch.log(logits + 1e-8)), dim=-1)

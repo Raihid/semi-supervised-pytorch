@@ -5,7 +5,7 @@ from torch.autograd import Variable
 from torch.nn import init
 
 from layers import GaussianSample, GaussianMerge, GumbelSoftmax
-from inference import log_gaussian, log_standard_gaussian
+from inference import log_gaussian, log_standard_gaussian, gaussian_entropy, log_marginal_gaussian
 
 
 class Perceptron(nn.Module):
@@ -30,7 +30,7 @@ class Perceptron(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, dims, sample_layer=GaussianSample):
+    def __init__(self, dims, sample_layer=GaussianSample, activation_fn=nn.ReLU, batch_norm=False):
         """
         Inference network
 
@@ -46,20 +46,50 @@ class Encoder(nn.Module):
         super(Encoder, self).__init__()
 
         [x_dim, h_dim, z_dim] = dims
-        neurons = [x_dim, *h_dim]
-        linear_layers = [nn.Linear(neurons[i-1], neurons[i]) for i in range(1, len(neurons))]
+
+        if isinstance(x_dim, list):
+            self.first_dense = nn.ModuleList(
+                [nn.Linear(in_dim, h_dim[0]) for in_dim in x_dim])
+        else:
+            self.first_dense = nn.ModuleList([nn.Linear(x_dim, h_dim[0])])
+
+        linear_layers = []
+        for idx in range(0, len(h_dim) - 1):
+            if batch_norm:
+                linear_layers += [
+                    activation_fn(),
+                    nn.BatchNorm1d(h_dim[idx]),
+                    nn.Linear(h_dim[idx], h_dim[idx+1])
+                ]
+            else:
+                linear_layers += [
+                    activation_fn(),
+                    nn.Linear(h_dim[idx], h_dim[idx+1])
+                ]
+
+        linear_layers += [activation_fn()] # nn.BatchNorm1d(h_dim[-1])]
+        if batch_norm:
+            linear_layers += [nn.BatchNorm1d(h_dim[-1])]
 
         self.hidden = nn.ModuleList(linear_layers)
         self.sample = sample_layer(h_dim[-1], z_dim)
 
-    def forward(self, x):
+    def forward(self, input_):
+        if not isinstance(input_, list):
+            input_ = [input_]
+
+        multi_x = []
+        for x, dense in zip(input_, self.first_dense):
+            multi_x += [dense(x)]
+        x = sum(multi_x)
+
         for layer in self.hidden:
-            x = F.relu(layer(x))
+            x = layer(x)
         return self.sample(x)
 
 
 class Decoder(nn.Module):
-    def __init__(self, dims):
+    def __init__(self, dims, output_activation=F.sigmoid, activation_fn=nn.ReLU, batch_norm=False):
         """
         Generative network
 
@@ -75,22 +105,99 @@ class Decoder(nn.Module):
 
         [z_dim, h_dim, x_dim] = dims
 
-        neurons = [z_dim, *h_dim]
-        linear_layers = [nn.Linear(neurons[i-1], neurons[i]) for i in range(1, len(neurons))]
+        if isinstance(z_dim, list):
+            self.first_dense = nn.ModuleList(
+                [nn.Linear(in_dim, h_dim[0]) for in_dim in z_dim])
+        else:
+            self.first_dense = nn.ModuleList([nn.Linear(z_dim, h_dim[0])])
+
+        linear_layers = []
+        for idx in range(0, len(h_dim) - 1):
+            if batch_norm:
+                linear_layers += [
+                    activation_fn(),
+                    nn.BatchNorm1d(h_dim[idx]),
+                    nn.Linear(h_dim[idx], h_dim[idx+1])
+                ]
+            else:
+                linear_layers += [
+                    activation_fn(),
+                    nn.Linear(h_dim[idx], h_dim[idx+1])
+                ]
+
+        linear_layers += [activation_fn()] # nn.BatchNorm1d(h_dim[-1])]
+        if batch_norm:
+            linear_layers += [nn.BatchNorm1d(h_dim[-1])]
+
         self.hidden = nn.ModuleList(linear_layers)
 
         self.reconstruction = nn.Linear(h_dim[-1], x_dim)
+        # TODO: output activation!
+        self.output_activation = output_activation
 
-        self.output_activation = nn.Sigmoid()
+
+    def forward(self, input_):
+        if not isinstance(input_, list):
+            input_ = [input_]
+
+        multi_x = []
+        for x, dense in zip(input_, self.first_dense):
+            multi_x += [dense(x)]
+        x = sum(multi_x)
+
+        for layer in self.hidden:
+            x = layer(x)
+
+        if self.output_activation is not None:
+            return self.output_activation(self.reconstruction(x))
+        else:
+            return self.reconstruction(x)
+
+
+class ConvPreEncoder(nn.Module):
+    def __init__(self): 
+        super(ConvPreEncoder, self).__init__()
+        kernel_size = 4
+        self.conv_layers = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size, stride=2, padding=1),
+        )
 
     def forward(self, x):
-        for layer in self.hidden:
-            x = F.relu(layer(x))
-        return self.output_activation(self.reconstruction(x))
+        x = self.conv_layers(x)
+        # print(x.shape)
+        return x.view(x.shape[0], -1)
+
+class ConvPostDecoder(nn.Module):
+    def __init__(self): 
+        super(ConvPostDecoder, self).__init__()
+        kernel_size = 4
+        self.conv_layers = nn.Sequential(
+            nn.ConvTranspose2d(64, 64, kernel_size, stride=2, padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, kernel_size, stride=2, padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, 32, kernel_size, stride=2, padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, 3, kernel_size, stride=2, padding=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        x = x.view(x.shape[0], 64, 4, 4)
+        # print(x.shape)
+        return self.conv_layers(x)
+
+    
 
 
 class VariationalAutoencoder(nn.Module):
-    def __init__(self, dims):
+    def __init__(self, dims, conv=False, activation_fn=nn.ReLU):
         """
         Variational Autoencoder [Kingma 2013] model
         consisting of an encoder/decoder pair for which
@@ -105,8 +212,22 @@ class VariationalAutoencoder(nn.Module):
         self.z_dim = z_dim
         self.flow = None
 
-        self.encoder = Encoder([x_dim, h_dim, z_dim])
-        self.decoder = Decoder([z_dim, list(reversed(h_dim)), x_dim])
+        self.conv = conv
+
+        if conv:
+            self.pre_encoder = ConvPreEncoder()
+            self.post_decoder = ConvPostDecoder()
+            x_dim = 64 * 4 * 4
+
+        self.encoder = Encoder(
+            [x_dim, h_dim, z_dim],
+            activation_fn=activation_fn
+        )
+        self.decoder = Decoder(
+            [z_dim, list(reversed(h_dim)), x_dim],
+            activation_fn=activation_fn
+        )
+
         self.kl_divergence = 0
 
         for m in self.modules():
@@ -128,6 +249,10 @@ class VariationalAutoencoder(nn.Module):
         :param p_param: (mu, log_var) of the p-distribution
         :return: KL(q||p)
         """
+
+        # This function was changed so that KLs are calculated
+        # analytically (and not via sampling), the same way as the
+        # original implementations.
         (mu, log_var) = q_param
 
         if self.flow is not None:
@@ -135,13 +260,9 @@ class VariationalAutoencoder(nn.Module):
             qz = log_gaussian(z, mu, log_var) - sum(log_det_z)
             z = f_z
         else:
-            qz = log_gaussian(z, mu, log_var)
+            qz = gaussian_entropy(mu, log_var)
 
-        if p_param is None:
-            pz = log_standard_gaussian(z)
-        else:
-            (mu, log_var) = p_param
-            pz = log_gaussian(z, mu, log_var)
+        pz = log_marginal_gaussian(mu, log_var)
 
         kl = qz - pz
 
@@ -159,11 +280,17 @@ class VariationalAutoencoder(nn.Module):
         :param x: input data
         :return: reconstructed input
         """
+        
+        if self.conv:
+            x = self.pre_encoder(x)
         z, z_mu, z_log_var = self.encoder(x)
 
         self.kl_divergence = self._kld(z, (z_mu, z_log_var))
 
         x_mu = self.decoder(z)
+
+        if self.conv: 
+            x_mu = self.post_decoder(x_mu)
 
         return x_mu
 
@@ -174,7 +301,16 @@ class VariationalAutoencoder(nn.Module):
         :param z: (torch.autograd.Variable) Random normal variable
         :return: (torch.autograd.Variable) generated sample
         """
-        return self.decoder(z)
+        if self.conv:
+            return self.post_decoder(self.decoder(z))
+        else:
+            return self.decoder(z)
+
+    def encode(self, x):
+        if self.conv:
+            return self.encoder(self.pre_encoder(x))
+        else:
+            return self.encoder(x)
 
 
 class GumbelAutoencoder(nn.Module):
@@ -338,3 +474,4 @@ class LadderVariationalAutoencoder(VariationalAutoencoder):
         for decoder in self.decoder:
             z = decoder(z)
         return self.reconstruction(z)
+
