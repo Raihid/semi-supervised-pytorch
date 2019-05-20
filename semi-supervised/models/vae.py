@@ -197,7 +197,7 @@ class ConvPostDecoder(nn.Module):
 
 
 class VariationalAutoencoder(nn.Module):
-    def __init__(self, dims, conv=False, activation_fn=nn.ReLU):
+    def __init__(self, dims, conv=False, activation_fn=nn.ReLU, batch_norm=True):
         """
         Variational Autoencoder [Kingma 2013] model
         consisting of an encoder/decoder pair for which
@@ -221,11 +221,13 @@ class VariationalAutoencoder(nn.Module):
 
         self.encoder = Encoder(
             [x_dim, h_dim, z_dim],
-            activation_fn=activation_fn
+            activation_fn=activation_fn,
+            batch_norm=batch_norm
         )
         self.decoder = Decoder(
             [z_dim, list(reversed(h_dim)), x_dim],
-            activation_fn=activation_fn
+            activation_fn=activation_fn,
+            batch_norm=batch_norm
         )
 
         self.kl_divergence = 0
@@ -240,19 +242,13 @@ class VariationalAutoencoder(nn.Module):
         """
         Computes the KL-divergence of
         some element z.
-
         KL(q||p) = -∫ q(z) log [ p(z) / q(z) ]
                  = -E[log p(z) - log q(z)]
-
         :param z: sample from q-distribuion
         :param q_param: (mu, log_var) of the q-distribution
         :param p_param: (mu, log_var) of the p-distribution
         :return: KL(q||p)
         """
-
-        # This function was changed so that KLs are calculated
-        # analytically (and not via sampling), the same way as the
-        # original implementations.
         (mu, log_var) = q_param
 
         if self.flow is not None:
@@ -260,9 +256,13 @@ class VariationalAutoencoder(nn.Module):
             qz = log_gaussian(z, mu, log_var) - sum(log_det_z)
             z = f_z
         else:
-            qz = gaussian_entropy(mu, log_var)
+            qz = log_gaussian(z, mu, log_var)
 
-        pz = log_marginal_gaussian(mu, log_var)
+        if p_param is None:
+            pz = log_standard_gaussian(z)
+        else:
+            (mu, log_var) = p_param
+            pz = log_gaussian(z, mu, log_var)
 
         kl = qz - pz
 
@@ -285,7 +285,9 @@ class VariationalAutoencoder(nn.Module):
             x = self.pre_encoder(x)
         z, z_mu, z_log_var = self.encoder(x)
 
-        self.kl_divergence = self._kld(z, (z_mu, z_log_var))
+        # Analytical
+        self.kl_divergence = gaussian_entropy(z_mu, z_log_var) - log_marginal_gaussian(z_mu, z_log_var)
+        # self._kld(z, (z_mu, z_log_var))
 
         x_mu = self.decoder(z)
 

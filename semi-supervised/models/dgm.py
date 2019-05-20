@@ -5,6 +5,7 @@ from torch.nn import init
 
 from .vae import VariationalAutoencoder
 from .vae import Encoder, Decoder, LadderEncoder, LadderDecoder, ConvPreEncoder, ConvPostDecoder
+from inference import gaussian_entropy, log_marginal_gaussian
 
 
 class Classifier(nn.Module):
@@ -45,7 +46,6 @@ class Classifier(nn.Module):
             linear_layers += [nn.BatchNorm1d(h_dim[-1])]
         
 
-        print("Linear layers in classifier", linear_layers)
         self.hidden = nn.ModuleList(linear_layers)
         self.logits = nn.Linear(h_dim[-1], y_dim)
 
@@ -115,7 +115,7 @@ class DeepGenerativeModel(VariationalAutoencoder):
         z, z_mu, z_log_var = self.encoder([x, y])
 
         # E_q(z|x, y) [ p(z) - q(z|x,y) ]
-        self.kl_divergence = self._kld(z, (z_mu, z_log_var))
+        self.kl_divergence = gaussian_entropy(z_mu, z_log_var) - log_marginal_gaussian(z_mu, z_log_var)
 
         # Reconstruct data point from latent data and label
         x_mu = self.decoder([z, y])
@@ -139,7 +139,7 @@ class DeepGenerativeModel(VariationalAutoencoder):
 
 
 class StackedDeepGenerativeModel():
-    def __init__(self, dims, features, activation_fn=nn.ReLU):
+    def __init__(self, dims, features, activation_fn=nn.ReLU, batch_norm=True):
         """
         M1+M2 model as described in [Kingma 2014].
 
@@ -153,7 +153,8 @@ class StackedDeepGenerativeModel():
         self.dgm = DeepGenerativeModel(
             [features.z_dim, y_dim, z_dim, h_dim],
             activation_fn=activation_fn,
-            output_activation=None
+            output_activation=None,
+            batch_norm=batch_norm
         )
 
         # Be sure to reconstruct with the same dimensions
@@ -271,17 +272,10 @@ class AuxiliaryDeepGenerativeModel(DeepGenerativeModel):
         if self.conv:
             x_mu = self.post_decoder(x_mu)
 
-        # No need to generate p(a|z,y,x)
+        p_a, p_a_mu, p_a_log_var = self.aux_decoder([x, y, z])
 
-        # KL done in the same way as in
-        # http://github.com/ml-lab/auxiliary-deep-generative-models 
-
-        # E_q(a,z|x, y) [ p(a) - q(a|x) ]
-        a_kl = self._kld(q_a, (q_a_mu, q_a_log_var))
-
-        # E_q(a,z|x, y) [ p(z) - q(z|x,y) ]
+        a_kl = self._kld(q_a, (q_a_mu, q_a_log_var), (p_a_mu, p_a_log_var))
         z_kl = self._kld(z, (z_mu, z_log_var))
-
         self.kl_divergence = a_kl + z_kl
 
         return x_mu
