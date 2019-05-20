@@ -40,7 +40,6 @@ class Classifier(nn.Module):
                     nn.Linear(h_dim[idx], h_dim[idx+1])
                 ]
 
-        # linear_layers += [activation_layer(), nn.BatchNorm1d(h_dim[-1])]
         linear_layers += [activation_fn()]
         if batch_norm:
             linear_layers += [nn.BatchNorm1d(h_dim[-1])]
@@ -104,6 +103,7 @@ class DeepGenerativeModel(VariationalAutoencoder):
         )
 
 
+        # Initialization
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 init.xavier_normal(m.weight.data)
@@ -115,6 +115,8 @@ class DeepGenerativeModel(VariationalAutoencoder):
         z, z_mu, z_log_var = self.encoder([x, y])
 
         # E_q(z|x, y) [ p(z) - q(z|x,y) ]
+        # Calculated analytically, following:
+        # https://github.com/dpkingma/nips14-ssl
         self.kl_divergence = gaussian_entropy(z_mu, z_log_var) - log_marginal_gaussian(z_mu, z_log_var)
 
         # Reconstruct data point from latent data and label
@@ -169,7 +171,7 @@ class StackedDeepGenerativeModel():
             param.requires_grad = False
 
     def encode(self, x, y=None):
-        _, x, _ = self.features.encode(x)
+        x, _, _ = self.features.encode(x)
         if y is None:
             logits = self.dgm.classifier(x)
             y = (logits == logits.max(1)[0].reshape(-1, 1)).float()
@@ -208,11 +210,14 @@ class AuxiliaryDeepGenerativeModel(DeepGenerativeModel):
         """
 
         [x_dim, y_dim, z_dim, a_dim, h_dim] = dims
+        # If we use convolutional layers we need to adjust the input dim to
+        # the FC part of the model.
         if conv:
             x_dim = 64 * 4 * 4
         super(AuxiliaryDeepGenerativeModel, self).__init__([x_dim, y_dim, z_dim, h_dim])
         self.conv = conv
 
+        # Convolutional layers before and after the FC part (used only for CelebA).
         if conv:
             self.pre_encoder = ConvPreEncoder()
             self.post_decoder = ConvPostDecoder()
@@ -261,7 +266,6 @@ class AuxiliaryDeepGenerativeModel(DeepGenerativeModel):
 
         # print(self.conv, x.shape)
         # Auxiliary inference q(a|x)
-
         q_a, q_a_mu, q_a_log_var = self.aux_encoder(x)
 
         # Latent inference q(z|a,y,x)
@@ -274,6 +278,8 @@ class AuxiliaryDeepGenerativeModel(DeepGenerativeModel):
 
         p_a, p_a_mu, p_a_log_var = self.aux_decoder([x, y, z])
 
+        # Empirical Dkls, as in:
+        # https://github.com/larsmaaloee/auxiliary-deep-generative-models
         a_kl = self._kld(q_a, (q_a_mu, q_a_log_var), (p_a_mu, p_a_log_var))
         z_kl = self._kld(z, (z_mu, z_log_var))
         self.kl_divergence = a_kl + z_kl
@@ -296,6 +302,7 @@ class AuxiliaryDeepGenerativeModel(DeepGenerativeModel):
         return x_mu
 
 
+# (MACIEK): We do not use this class.
 class LadderDeepGenerativeModel(DeepGenerativeModel):
     def __init__(self, dims):
         """

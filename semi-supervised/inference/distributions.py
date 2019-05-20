@@ -29,12 +29,21 @@ def log_gaussian(x, mu, log_var):
 
 
 def gaussian_entropy(mu, log_var):
+    """
+    The following entropy calculate analytically:
+    -log E_{N(µ, σ)} [ N(µ, σ) ]
+    """
+
     entropy = -0.5 * (np.log(2 * math.pi) + 1 + log_var)
     entropy = torch.sum(entropy, dim=-1)
     return entropy
 
 
 def log_marginal_gaussian(mu, log_var):
+    """
+    The following expectaction calculated analytically:
+    log E_{x ~ N(µ, σ)} [  N(x | 0, 1) ] 
+    """
     log_marginal = -0.5 * (np.log(2 * math.pi) + (mu ** 2 + torch.exp(log_var)))
     log_marginal = torch.sum(log_marginal, dim=-1)
     return log_marginal

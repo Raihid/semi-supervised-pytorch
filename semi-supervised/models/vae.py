@@ -53,6 +53,8 @@ class Encoder(nn.Module):
         else:
             self.first_dense = nn.ModuleList([nn.Linear(x_dim, h_dim[0])])
 
+        # Combine all inputs in the first layer by summation
+        # e.g. z = w_1 * x + w_2 * a
         linear_layers = []
         for idx in range(0, len(h_dim) - 1):
             if batch_norm:
@@ -67,7 +69,7 @@ class Encoder(nn.Module):
                     nn.Linear(h_dim[idx], h_dim[idx+1])
                 ]
 
-        linear_layers += [activation_fn()] # nn.BatchNorm1d(h_dim[-1])]
+        linear_layers += [activation_fn()]
         if batch_norm:
             linear_layers += [nn.BatchNorm1d(h_dim[-1])]
 
@@ -111,6 +113,8 @@ class Decoder(nn.Module):
         else:
             self.first_dense = nn.ModuleList([nn.Linear(z_dim, h_dim[0])])
 
+        # Combine all inputs in the first layer by summation
+        # e.g. z = w_1 * x + w_2 * a
         linear_layers = []
         for idx in range(0, len(h_dim) - 1):
             if batch_norm:
@@ -125,14 +129,13 @@ class Decoder(nn.Module):
                     nn.Linear(h_dim[idx], h_dim[idx+1])
                 ]
 
-        linear_layers += [activation_fn()] # nn.BatchNorm1d(h_dim[-1])]
+        linear_layers += [activation_fn()]
         if batch_norm:
             linear_layers += [nn.BatchNorm1d(h_dim[-1])]
 
         self.hidden = nn.ModuleList(linear_layers)
 
         self.reconstruction = nn.Linear(h_dim[-1], x_dim)
-        # TODO: output activation!
         self.output_activation = output_activation
 
 
@@ -170,7 +173,6 @@ class ConvPreEncoder(nn.Module):
 
     def forward(self, x):
         x = self.conv_layers(x)
-        # print(x.shape)
         return x.view(x.shape[0], -1)
 
 class ConvPostDecoder(nn.Module):
@@ -190,7 +192,6 @@ class ConvPostDecoder(nn.Module):
 
     def forward(self, x):
         x = x.view(x.shape[0], 64, 4, 4)
-        # print(x.shape)
         return self.conv_layers(x)
 
     
@@ -285,9 +286,8 @@ class VariationalAutoencoder(nn.Module):
             x = self.pre_encoder(x)
         z, z_mu, z_log_var = self.encoder(x)
 
-        # Analytical
+        # Analytical, following https://github.com/dpkingma/nips14-ssl
         self.kl_divergence = gaussian_entropy(z_mu, z_log_var) - log_marginal_gaussian(z_mu, z_log_var)
-        # self._kld(z, (z_mu, z_log_var))
 
         x_mu = self.decoder(z)
 
@@ -315,6 +315,7 @@ class VariationalAutoencoder(nn.Module):
             return self.encoder(x)
 
 
+# (MACIEK): we do not use the classes defined below.
 class GumbelAutoencoder(nn.Module):
     def __init__(self, dims, n_samples=100):
         super(GumbelAutoencoder, self).__init__()
