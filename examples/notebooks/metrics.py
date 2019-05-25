@@ -215,6 +215,9 @@ def save_samples(prefix, model, im_shape, n_samples, classes_num, z_dim):
         for idx, pixels in enumerate(outputs):
             filename = "{}/c{}_{}.png".format(
                 samples_dir, class_idx, str(idx).zfill(5))
-            img = Image.fromarray(pixels, "RGB")
+            if im_c == 1:
+                img = Image.fromarray(pixels.squeeze(), "L")
+            else:
+                img = Image.fromarray(pixels, "RGB")
             img.save(filename)
 
